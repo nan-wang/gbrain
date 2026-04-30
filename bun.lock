@@ -14,6 +14,7 @@
         "marked": "^18.0.0",
         "openai": "^4.0.0",
         "pgvector": "^0.2.0",
+        "pinyin-pro": "^3.26.0",
         "postgres": "^3.4.0",
         "tree-sitter-wasms": "0.1.13",
         "web-tree-sitter": "0.22.6",
@@ -407,6 +408,8 @@
     "path-to-regexp": ["path-to-regexp@8.4.2", "", {}, "sha512-qRcuIdP69NPm4qbACK+aDogI5CBDMi1jKe0ry5rSQJz8JVLsC7jV8XpiJjGRLLol3N+R5ihGYcrPLTno6pAdBA=="],
 
     "pgvector": ["pgvector@0.2.1", "", {}, "sha512-nKaQY9wtuiidwLMdVIce1O3kL0d+FxrigCVzsShnoqzOSaWWWOvuctb/sYwlai5cTwwzRSNa+a/NtN2kVZGNJw=="],
+
+    "pinyin-pro": ["pinyin-pro@3.28.1", "", {}, "sha512-oqz8ulwRgtUXRi0vbqEfGNly19zpyCxYrjhkk5TibGcgSW6eNwS5woajCXRwqURi8Ehc2yOFTiB4uNoZ+NJOnA=="],
 
     "pkce-challenge": ["pkce-challenge@5.0.1", "", {}, "sha512-wQ0b/W4Fr01qtpHlqSqspcj3EhBvimsdh0KlHhH8HRZnMsEa0ea2fTULOXOS9ccQr3om+GcGRk4e+isrZWV8qQ=="],
 

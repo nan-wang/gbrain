@@ -5,25 +5,29 @@
  * 5-level delimiter hierarchy:
  *   1. Paragraphs (\n\n)
  *   2. Lines (\n)
- *   3. Sentences (. ! ? followed by space or newline)
- *   4. Clauses (; : , )
- *   5. Words (whitespace)
+ *   3. Sentences (. ! ? followed by space or newline; also CJK 。！？)
+ *   4. Clauses (; : , ; also CJK ；：，、)
+ *   5. Words (whitespace; CJK fallback splits at segmenter word boundaries)
  *
- * Config: 300-word chunks with 50-word sentence-aware overlap.
+ * Config: 300-token chunks with 50-token sentence-aware overlap. Tokens are
+ * Latin words OR CJK words (via Intl.Segmenter), summed for mixed content
+ * via `countTokens` so 300-token chunks are meaningful for both languages.
+ *
  * Lossless invariant: non-overlapping portions reassemble to original.
  */
+import { hasCJK, countTokens } from '../tokenizer.ts';
 
 const DELIMITERS: string[][] = [
-  ['\n\n'],                          // L0: paragraphs
-  ['\n'],                            // L1: lines
-  ['. ', '! ', '? ', '.\n', '!\n', '?\n'], // L2: sentences
-  ['; ', ': ', ', '],                // L3: clauses
-  [],                                // L4: words (whitespace split)
+  ['\n\n'],                                                                                                      // L0: paragraphs
+  ['\n'],                                                                                                        // L1: lines
+  ['. ', '! ', '? ', '.\n', '!\n', '?\n', '。', '！', '？', '。\n', '！\n', '？\n'],                            // L2: sentences (Latin + CJK)
+  ['; ', ': ', ', ', '；', '：', '，', '、'],                                                                    // L3: clauses (Latin + CJK)
+  [],                                                                                                            // L4: words (whitespace + CJK segmenter fallback)
 ];
 
 export interface ChunkOptions {
-  chunkSize?: number;    // target words per chunk (default 300)
-  chunkOverlap?: number; // overlap words (default 50)
+  chunkSize?: number;    // target tokens per chunk (default 300)
+  chunkOverlap?: number; // overlap tokens (default 50)
 }
 
 export interface TextChunk {
@@ -37,7 +41,7 @@ export function chunkText(text: string, opts?: ChunkOptions): TextChunk[] {
 
   if (!text || text.trim().length === 0) return [];
 
-  const wordCount = countWords(text);
+  const wordCount = countTokens(text);
   if (wordCount <= chunkSize) {
     return [{ text: text.trim(), index: 0 }];
   }
@@ -52,13 +56,12 @@ export function chunkText(text: string, opts?: ChunkOptions): TextChunk[] {
 
 function recursiveSplit(text: string, level: number, target: number): string[] {
   if (level >= DELIMITERS.length) {
-    // Level 4: split on whitespace
-    return splitOnWhitespace(text, target);
+    return splitFallback(text, target);
   }
 
   const delimiters = DELIMITERS[level];
   if (delimiters.length === 0) {
-    return splitOnWhitespace(text, target);
+    return splitFallback(text, target);
   }
 
   const pieces = splitAtDelimiters(text, delimiters);
@@ -71,7 +74,7 @@ function recursiveSplit(text: string, level: number, target: number): string[] {
   // Check if any piece is still too large, recurse deeper
   const result: string[] = [];
   for (const piece of pieces) {
-    if (countWords(piece) > target) {
+    if (countTokens(piece) > target) {
       result.push(...recursiveSplit(piece, level + 1, target));
     } else {
       result.push(piece);
@@ -123,8 +126,22 @@ function splitAtDelimiters(text: string, delimiters: string[]): string[] {
 }
 
 /**
- * Fallback: split on whitespace boundaries to hit target word count.
+ * Fallback splitter for L4 (no delimiters left). Routes to whitespace-based
+ * splitting for Latin and a CJK-aware character-window splitter for runs of
+ * unsegmentable Chinese (no whitespace, no CJK punctuation).
+ *
+ * The character-window approach is intentionally simple — for the worst case
+ * (a 5000-character Chinese paragraph with no punctuation), it slices every
+ * `target` characters. Higher levels handle the typical case (sentence and
+ * clause delimiters do most of the work).
  */
+function splitFallback(text: string, target: number): string[] {
+  if (hasCJK(text) && !/\s/.test(text)) {
+    return splitCJKChars(text, target);
+  }
+  return splitOnWhitespace(text, target);
+}
+
 function splitOnWhitespace(text: string, target: number): string[] {
   const words = text.match(/\S+\s*/g) || [];
   if (words.length === 0) return [];
@@ -135,6 +152,21 @@ function splitOnWhitespace(text: string, target: number): string[] {
     if (slice.trim().length > 0) {
       pieces.push(slice);
     }
+  }
+  return pieces;
+}
+
+/**
+ * Slice a CJK run into pieces of approximately `target` characters. Lossless
+ * (every character preserved). Used only when sentence/clause delimiters
+ * fail to break a long CJK run, which is rare — most CJK content uses
+ * `。！？` punctuation that L2 catches.
+ */
+function splitCJKChars(text: string, target: number): string[] {
+  const pieces: string[] = [];
+  for (let i = 0; i < text.length; i += target) {
+    const slice = text.slice(i, i + target);
+    if (slice.trim().length > 0) pieces.push(slice);
   }
   return pieces;
 }
@@ -151,7 +183,7 @@ function greedyMerge(pieces: string[], target: number): string[] {
 
   for (let i = 1; i < pieces.length; i++) {
     const combined = current + pieces[i];
-    if (countWords(combined) <= Math.ceil(target * 1.5)) {
+    if (countTokens(combined) <= Math.ceil(target * 1.5)) {
       current = combined;
     } else {
       result.push(current);
@@ -168,7 +200,7 @@ function greedyMerge(pieces: string[], target: number): string[] {
 
 /**
  * Apply sentence-aware trailing overlap.
- * The last N words of chunk[i] are prepended to chunk[i+1].
+ * The last N tokens of chunk[i] are prepended to chunk[i+1].
  */
 function applyOverlap(chunks: string[], overlapWords: number): string[] {
   if (chunks.length <= 1 || overlapWords <= 0) return chunks;
@@ -184,28 +216,38 @@ function applyOverlap(chunks: string[], overlapWords: number): string[] {
 }
 
 /**
- * Extract the last N words from text, trying to align to sentence boundaries.
- * If a sentence boundary exists within the last N words, start there.
+ * Extract the last N tokens from text, trying to align to sentence boundaries.
+ * If a sentence boundary exists within the last N tokens, start there.
+ *
+ * For CJK-only chunks (no whitespace), tokens are characters approximately,
+ * so we slice the last N characters and try to align at a `。！？` boundary.
  */
 function extractTrailingContext(text: string, targetWords: number): string {
+  if (hasCJK(text) && !/\s/.test(text)) {
+    if (text.length <= targetWords) return '';
+    const trailing = text.slice(-targetWords);
+    // Try to align to a CJK sentence boundary inside `trailing`.
+    const sentenceStart = trailing.search(/[。！？]/);
+    if (sentenceStart !== -1 && sentenceStart < trailing.length / 2) {
+      const afterSentence = trailing.slice(sentenceStart).replace(/^[。！？]\s*/, '');
+      if (afterSentence.trim().length > 0) return afterSentence;
+    }
+    return trailing;
+  }
+
   const words = text.match(/\S+\s*/g) || [];
   if (words.length <= targetWords) return '';
 
   const trailing = words.slice(-targetWords).join('');
 
-  // Try to find a sentence boundary to start from
-  const sentenceStart = trailing.search(/[.!?]\s+/);
+  // Try to find a sentence boundary (Latin or CJK) to start from
+  const sentenceStart = trailing.search(/[.!?。！？]\s*/);
   if (sentenceStart !== -1 && sentenceStart < trailing.length / 2) {
-    // Start after the sentence boundary
-    const afterSentence = trailing.slice(sentenceStart).replace(/^[.!?]\s+/, '');
+    const afterSentence = trailing.slice(sentenceStart).replace(/^[.!?。！？]\s*/, '');
     if (afterSentence.trim().length > 0) {
       return afterSentence;
     }
   }
 
   return trailing;
-}
-
-function countWords(text: string): number {
-  return (text.match(/\S+/g) || []).length;
 }

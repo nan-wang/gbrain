@@ -14,6 +14,7 @@
  */
 
 import { chunkText as recursiveChunk, type TextChunk } from './recursive.ts';
+import { countTokens } from '../tokenizer.ts';
 
 export interface SemanticChunkOptions {
   chunkSize?: number;
@@ -59,7 +60,7 @@ export async function chunkTextSemantic(
     let idx = 0;
     for (const group of groups) {
       const groupText = group.join(' ');
-      const wordCount = (groupText.match(/\S+/g) || []).length;
+      const wordCount = countTokens(groupText);
 
       if (wordCount > chunkSize * 1.5) {
         const subChunks = recursiveChunk(groupText, { chunkSize, chunkOverlap });
@@ -79,11 +80,14 @@ export async function chunkTextSemantic(
 }
 
 /**
- * Split text into sentences. Handles common abbreviations.
+ * Split text into sentences. Handles common abbreviations and CJK
+ * sentence terminators (`。！？`). CJK sentences typically have no
+ * trailing whitespace, so the regex tolerates `\s*` (zero-or-more) after
+ * the terminator instead of requiring `\s+`.
  */
 export function splitSentences(text: string): string[] {
-  // Split on sentence-ending punctuation followed by whitespace or newline
-  const raw = text.split(/(?<=[.!?])\s+/);
+  // Latin terminator + whitespace OR CJK terminator (no trailing space required).
+  const raw = text.split(/(?:(?<=[.!?])\s+)|(?<=[。！？])\s*/);
   return raw
     .map(s => s.trim())
     .filter(s => s.length > 0);

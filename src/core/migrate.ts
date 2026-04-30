@@ -1073,6 +1073,87 @@ export const MIGRATIONS: Migration[] = [
     },
     sql: '',
   },
+  {
+    version: 30,
+    name: 'cjk_pre_segmented_columns',
+    // Bilingual (Chinese + English) FTS support. Adds app-side word-segmented
+    // mirror columns to both pages and content_chunks, and replaces both
+    // FTS trigger functions to append a to_tsvector('simple', ...) channel
+    // per existing English channel.
+    //
+    // Why mirror columns instead of in-trigger tokenization: Intl.Segmenter
+    // is JS-only and can't run inside a Postgres trigger. Application code
+    // (putPage + chunk-insert paths) populates the *_segmented columns with
+    // segmentText() output before upsert; the trigger reads them.
+    //
+    // Empty/NULL segmented columns are no-ops (the english channel still
+    // covers Latin content), so existing English-only brains keep working
+    // without a backfill — only freshly-written rows pick up the CJK
+    // channel until the v0.23.0 orchestrator backfills existing rows.
+    //
+    // The chunk trigger's BEFORE INSERT OR UPDATE OF clause widens to also
+    // refire when the new *_segmented columns change, so a backfill UPDATE
+    // on those columns rebuilds search_vector correctly.
+    //
+    // Identical SQL on both engines — no sqlFor needed.
+    sql: `
+      -- pages: 3 segmented mirror columns (weights A/B/C)
+      ALTER TABLE pages
+        ADD COLUMN IF NOT EXISTS title_segmented           TEXT,
+        ADD COLUMN IF NOT EXISTS compiled_truth_segmented  TEXT,
+        ADD COLUMN IF NOT EXISTS timeline_segmented        TEXT;
+
+      -- content_chunks: 2 segmented mirror columns (weights B + A respectively)
+      ALTER TABLE content_chunks
+        ADD COLUMN IF NOT EXISTS chunk_text_segmented  TEXT,
+        ADD COLUMN IF NOT EXISTS doc_comment_segmented TEXT;
+
+      -- Replace page-grain FTS trigger function with bilingual shape.
+      CREATE OR REPLACE FUNCTION update_page_search_vector() RETURNS trigger AS $$
+      DECLARE
+        timeline_text TEXT;
+      BEGIN
+        SELECT coalesce(string_agg(summary || ' ' || detail, ' '), '')
+        INTO timeline_text
+        FROM timeline_entries
+        WHERE page_id = NEW.id;
+
+        NEW.search_vector :=
+          setweight(to_tsvector('english', coalesce(NEW.title, '')), 'A') ||
+          setweight(to_tsvector('simple',  coalesce(NEW.title_segmented, '')), 'A') ||
+          setweight(to_tsvector('english', coalesce(NEW.compiled_truth, '')), 'B') ||
+          setweight(to_tsvector('simple',  coalesce(NEW.compiled_truth_segmented, '')), 'B') ||
+          setweight(to_tsvector('english', coalesce(NEW.timeline, '')), 'C') ||
+          setweight(to_tsvector('simple',  coalesce(NEW.timeline_segmented, '')), 'C') ||
+          setweight(to_tsvector('english', coalesce(timeline_text, '')), 'C');
+
+        RETURN NEW;
+      END;
+      $$ LANGUAGE plpgsql;
+
+      -- Replace chunk-grain FTS trigger function with bilingual shape.
+      CREATE OR REPLACE FUNCTION update_chunk_search_vector() RETURNS TRIGGER AS $fn$
+      BEGIN
+        NEW.search_vector :=
+          setweight(to_tsvector('english', COALESCE(NEW.doc_comment, '')), 'A') ||
+          setweight(to_tsvector('simple',  COALESCE(NEW.doc_comment_segmented, '')), 'A') ||
+          setweight(to_tsvector('english', COALESCE(NEW.symbol_name_qualified, '')), 'A') ||
+          setweight(to_tsvector('english', COALESCE(NEW.chunk_text, '')), 'B') ||
+          setweight(to_tsvector('simple',  COALESCE(NEW.chunk_text_segmented, '')), 'B');
+        RETURN NEW;
+      END;
+      $fn$ LANGUAGE plpgsql;
+
+      -- Re-create chunk trigger with widened BEFORE INSERT OR UPDATE OF clause
+      -- so backfill UPDATEs on the new segmented columns rebuild search_vector.
+      DROP TRIGGER IF EXISTS chunk_search_vector_trigger ON content_chunks;
+      CREATE TRIGGER chunk_search_vector_trigger
+        BEFORE INSERT OR UPDATE OF chunk_text, doc_comment, symbol_name_qualified,
+                                    chunk_text_segmented, doc_comment_segmented
+        ON content_chunks
+        FOR EACH ROW EXECUTE FUNCTION update_chunk_search_vector();
+    `,
+  },
 ];
 
 export const LATEST_VERSION = MIGRATIONS.length > 0

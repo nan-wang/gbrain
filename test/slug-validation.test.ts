@@ -51,6 +51,31 @@ describe('slugifySegment', () => {
   test('handles curly quotes and ellipsis', () => {
     expect(slugifySegment('she\u2026said \u201chello\u201d')).toBe('shesaid-hello');
   });
+
+  // CJK pinyin transliteration (v0.23 bilingual support).
+  // ICU's `Intl.Segmenter` (zh, granularity: 'word') decides word boundaries
+  // heuristically \u2014 `\u767e\u5ea6` and `\u5f20\u4e09` are recognized as single words, but
+  // `\u817e\u8baf` is split into `\u817e`+`\u8baf`. Tests pin observed behavior; agents/users
+  // can manually rename a slug when ICU's segmentation produces something
+  // unwieldy.
+  test('Han ideograph brand names \u2192 ASCII pinyin', () => {
+    expect(slugifySegment('\u767e\u5ea6')).toBe('baidu');
+    expect(slugifySegment('\u5f20\u4e09')).toBe('zhangsan');
+    expect(slugifySegment('\u817e\u8baf')).toBe('teng-xun'); // ICU splits into 2 chars
+  });
+
+  test('Han ideograph compound words \u2192 hyphen-separated pinyin', () => {
+    expect(slugifySegment('\u4eba\u5de5\u667a\u80fd')).toBe('rengong-zhineng');
+  });
+
+  test('Han ideograph multi-pronunciation chars disambiguate', () => {
+    expect(slugifySegment('\u91cd\u5e86')).toBe('chongqing');
+  });
+
+  test('mixed Latin + Han preserves both sides', () => {
+    expect(slugifySegment('Apple \u516c\u53f8')).toBe('apple-gongsi');
+    expect(slugifySegment('OpenAI \u4e2d\u56fd')).toBe('openai-zhongguo');
+  });
 });
 
 describe('slugifyPath', () => {
@@ -109,6 +134,20 @@ describe('slugifyPath', () => {
   test('meetings transcript example', () => {
     expect(slugifyPath('meetings/transcripts/2026-01-21 maria - california c4 collaboration discussion.md'))
       .toBe('meetings/transcripts/2026-01-21-maria-california-c4-collaboration-discussion');
+  });
+
+  // CJK paths (v0.23 bilingual support)
+  test('Han ideograph filename gets pinyin slug', () => {
+    expect(slugifyPath('companies/百度.md')).toBe('companies/baidu');
+  });
+
+  test('Han ideograph + Latin suffix preserves both', () => {
+    expect(slugifyPath('people/张三-2024.md')).toBe('people/zhangsan-2024');
+  });
+
+  test('idempotent on already-pinyin slugs', () => {
+    expect(slugifyPath(slugifyPath('companies/百度.md'))).toBe('companies/baidu');
+    expect(slugifyPath(slugifyPath('people/张三.md'))).toBe('people/zhangsan');
   });
 });
 

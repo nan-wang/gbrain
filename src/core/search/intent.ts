@@ -9,7 +9,9 @@
 
 export type QueryIntent = 'entity' | 'temporal' | 'event' | 'general';
 
-// Temporal patterns: questions about when things happened, meeting history
+// Temporal patterns: questions about when things happened, meeting history.
+// Chinese terms additive — `\b` word boundaries don't match between CJK
+// characters, so the Chinese alternations match on raw substring presence.
 const TEMPORAL_PATTERNS = [
   /\bwhen\b/i,
   /\blast\s+(met|meeting|call|conversation|chat|talked|spoke|seen|heard|time)\b/i,
@@ -23,6 +25,7 @@ const TEMPORAL_PATTERNS = [
   /\bhow\s+long\s+(ago|since)\b/i,
   /\b\d{4}[-/]\d{2}\b/i, // date pattern like 2024-03
   /\blast\s+(week|month|quarter|year)\b/i,
+  /什么时候|何时|多久|多长时间|去年|上周|上个月|最近|今年|昨天|前天|以前|历史|时间线/,
 ];
 
 // Event patterns: specific events, announcements, launches
@@ -36,6 +39,7 @@ const EVENT_PATTERNS = [
   /\bmerge[drs]?\b/i,
   /\bnews\b/i,
   /\bhappened?\b/i,
+  /发生|事件|会议|活动|融资|收购|合并|新闻|宣布|推出|发布/,
 ];
 
 // Entity patterns: identity questions, overviews
@@ -49,6 +53,7 @@ const ENTITY_PATTERNS = [
   /\bbackground\b/i,
   /\bprofile\b/i,
   /\bwhat\s+do\s+(you|we)\s+know\b/i,
+  /谁是|是谁|什么是|是什么|介绍一下|简介|背景|概述|概况|哪个|哪家|哪位/,
 ];
 
 // Full-context patterns: requests for everything
@@ -59,6 +64,7 @@ const FULL_CONTEXT_PATTERNS = [
   /\bcomprehensive\b/i,
   /\bdeep\s+dive\b/i,
   /\bgive\s+me\s+everything\b/i,
+  /所有|全部|完整|详细|详情|深入分析|综合|全面/,
 ];
 
 /**

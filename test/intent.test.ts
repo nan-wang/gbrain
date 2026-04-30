@@ -161,3 +161,34 @@ describe('autoDetectDetail', () => {
     expect(autoDetectDetail('fintech payments')).toBeUndefined();
   });
 });
+
+describe('CJK query intent classification (v0.23 bilingual)', () => {
+  test('"什么时候开会" → temporal', () => {
+    expect(classifyQueryIntent('什么时候开会')).toBe('temporal');
+  });
+
+  test('"谁是CEO" → entity', () => {
+    expect(classifyQueryIntent('谁是CEO')).toBe('entity');
+  });
+
+  test('"百度发生了什么" → event', () => {
+    expect(classifyQueryIntent('百度发生了什么')).toBe('event');
+  });
+
+  test('"介绍一下OpenAI" → entity', () => {
+    expect(classifyQueryIntent('介绍一下OpenAI')).toBe('entity');
+  });
+
+  test('"完整历史" → temporal (full-context override)', () => {
+    expect(classifyQueryIntent('完整历史')).toBe('temporal');
+  });
+
+  test('"百度融资" → event', () => {
+    expect(classifyQueryIntent('百度融资')).toBe('event');
+  });
+
+  test('CJK general query → general', () => {
+    // No keyword pattern matches — falls through to general.
+    expect(classifyQueryIntent('技术架构')).toBe('general');
+  });
+});

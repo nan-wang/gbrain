@@ -15,6 +15,7 @@
 
 import type { BrainEngine } from './engine.ts';
 import { waitForCapacity } from './backoff.ts';
+import { pinyinTransliterate } from './tokenizer.ts';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -44,9 +45,12 @@ export interface EnrichmentResult {
 // Entity naming utilities
 // ---------------------------------------------------------------------------
 
-/** Convert an entity name to a URL-safe slug. */
+/**
+ * Convert an entity name to a URL-safe slug. Han ideographs are
+ * pinyin-transliterated first so 百度 → companies/baidu, 张三 → people/zhangsan.
+ */
 export function slugifyEntity(name: string, type: 'person' | 'company'): string {
-  const slug = name
+  const slug = pinyinTransliterate(name)
     .toLowerCase()
     .replace(/['']/g, '')
     .replace(/[^a-z0-9]+/g, '-')

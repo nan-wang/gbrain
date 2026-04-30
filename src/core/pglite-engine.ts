@@ -22,6 +22,7 @@ import type {
 import { validateSlug, contentHash, rowToPage, rowToChunk, rowToSearchResult } from './utils.ts';
 import { resolveBoostMap, resolveHardExcludes } from './search/source-boost.ts';
 import { buildSourceFactorCase, buildHardExcludeClause } from './search/sql-ranking.ts';
+import { segmentText } from './tokenizer.ts';
 
 type PGLiteDB = PGlite;
 
@@ -252,9 +253,18 @@ export class PGLiteEngine implements BrainEngine {
     // global UNIQUE(slug) was dropped in migration v17. Step 5+ will
     // surface an explicit sourceId param on putPage for multi-source sync.
     const pageKind = page.page_kind || 'markdown';
+    // Bilingual FTS (migration v30): pre-segment CJK content. See
+    // postgres-engine.ts putPage for the design rationale.
+    const titleSeg          = segmentText(page.title || '');
+    const compiledTruthSeg  = segmentText(page.compiled_truth || '');
+    const timelineSeg       = segmentText(page.timeline || '');
     const { rows } = await this.db.query(
-      `INSERT INTO pages (slug, type, page_kind, title, compiled_truth, timeline, frontmatter, content_hash, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, now())
+      `INSERT INTO pages (
+         slug, type, page_kind, title, compiled_truth, timeline,
+         frontmatter, content_hash, updated_at,
+         title_segmented, compiled_truth_segmented, timeline_segmented
+       )
+       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, now(), $9, $10, $11)
        ON CONFLICT (source_id, slug) DO UPDATE SET
          type = EXCLUDED.type,
          page_kind = EXCLUDED.page_kind,
@@ -263,9 +273,13 @@ export class PGLiteEngine implements BrainEngine {
          timeline = EXCLUDED.timeline,
          frontmatter = EXCLUDED.frontmatter,
          content_hash = EXCLUDED.content_hash,
+         title_segmented = EXCLUDED.title_segmented,
+         compiled_truth_segmented = EXCLUDED.compiled_truth_segmented,
+         timeline_segmented = EXCLUDED.timeline_segmented,
          updated_at = now()
        RETURNING id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at`,
-      [slug, page.type, pageKind, page.title, page.compiled_truth, page.timeline || '', JSON.stringify(frontmatter), hash]
+      [slug, page.type, pageKind, page.title, page.compiled_truth, page.timeline || '', JSON.stringify(frontmatter), hash,
+       titleSeg, compiledTruthSeg, timelineSeg]
     );
     return rowToPage(rows[0] as Record<string, unknown>);
   }
@@ -362,8 +376,13 @@ export class PGLiteEngine implements BrainEngine {
     const hardExcludePrefixes = resolveHardExcludes(opts?.exclude_slug_prefixes, opts?.include_slug_prefixes);
     const hardExcludeClause = buildHardExcludeClause('p.slug', hardExcludePrefixes);
 
+    // Bilingual FTS: $1 drives the english channel, $2 drives the simple
+    // channel built from CJK word segments. Latin-only queries set $2 to ''
+    // so plainto_tsquery returns empty and the OR-concat is a no-op.
+    const segmentedQuery = segmentText(query);
+
     // v0.20.0 Cathedral II Layer 10 C1/C2: language + symbol-kind filters.
-    const params: unknown[] = [query, innerLimit, limit, offset];
+    const params: unknown[] = [query, segmentedQuery, innerLimit, limit, offset];
     let extraFilter = '';
     if (opts?.language) {
       params.push(opts.language);
@@ -374,20 +393,22 @@ export class PGLiteEngine implements BrainEngine {
       extraFilter += ` AND cc.symbol_type = $${params.length}`;
     }
 
+    const tsqueryExpr =
+      `(websearch_to_tsquery('english', $1) || plainto_tsquery('simple', $2))`;
     const { rows } = await this.db.query(
       `WITH ranked AS (
          SELECT
            p.slug, p.id as page_id, p.title, p.type, p.source_id,
            cc.id as chunk_id, cc.chunk_index, cc.chunk_text, cc.chunk_source,
-           ts_rank(cc.search_vector, websearch_to_tsquery('english', $1)) * ${sourceFactorCase} AS score,
+           ts_rank(cc.search_vector, ${tsqueryExpr}) * ${sourceFactorCase} AS score,
            CASE WHEN p.updated_at < (
              SELECT MAX(te.created_at) FROM timeline_entries te WHERE te.page_id = p.id
            ) THEN true ELSE false END AS stale
          FROM content_chunks cc
          JOIN pages p ON p.id = cc.page_id
-         WHERE cc.search_vector @@ websearch_to_tsquery('english', $1) ${detailFilter}${extraFilter} ${hardExcludeClause}
+         WHERE cc.search_vector @@ ${tsqueryExpr} ${detailFilter}${extraFilter} ${hardExcludeClause}
          ORDER BY score DESC
-         LIMIT $2
+         LIMIT $3
        ),
        best_per_page AS (
          SELECT DISTINCT ON (slug) *
@@ -396,7 +417,7 @@ export class PGLiteEngine implements BrainEngine {
        )
        SELECT * FROM best_per_page
        ORDER BY score DESC
-       LIMIT $3 OFFSET $4`,
+       LIMIT $4 OFFSET $5`,
       params
     );
 
@@ -431,7 +452,10 @@ export class PGLiteEngine implements BrainEngine {
     const hardExcludePrefixes = resolveHardExcludes(opts?.exclude_slug_prefixes, opts?.include_slug_prefixes);
     const hardExcludeClause = buildHardExcludeClause('p.slug', hardExcludePrefixes);
 
-    const params: unknown[] = [query, limit, offset];
+    // Bilingual FTS — see searchKeyword for the design rationale.
+    const segmentedQuery = segmentText(query);
+
+    const params: unknown[] = [query, segmentedQuery, limit, offset];
     let extraFilter = '';
     if (opts?.language) {
       params.push(opts.language);
@@ -442,19 +466,21 @@ export class PGLiteEngine implements BrainEngine {
       extraFilter += ` AND cc.symbol_type = $${params.length}`;
     }
 
+    const tsqueryExpr =
+      `(websearch_to_tsquery('english', $1) || plainto_tsquery('simple', $2))`;
     const { rows } = await this.db.query(
       `SELECT
          p.slug, p.id as page_id, p.title, p.type, p.source_id,
          cc.id as chunk_id, cc.chunk_index, cc.chunk_text, cc.chunk_source,
-         ts_rank(cc.search_vector, websearch_to_tsquery('english', $1)) * ${sourceFactorCase} AS score,
+         ts_rank(cc.search_vector, ${tsqueryExpr}) * ${sourceFactorCase} AS score,
          CASE WHEN p.updated_at < (
            SELECT MAX(te.created_at) FROM timeline_entries te WHERE te.page_id = p.id
          ) THEN true ELSE false END AS stale
        FROM content_chunks cc
        JOIN pages p ON p.id = cc.page_id
-       WHERE cc.search_vector @@ websearch_to_tsquery('english', $1) ${detailFilter}${extraFilter} ${hardExcludeClause}
+       WHERE cc.search_vector @@ ${tsqueryExpr} ${detailFilter}${extraFilter} ${hardExcludeClause}
        ORDER BY score DESC
-       LIMIT $2 OFFSET $3`,
+       LIMIT $3 OFFSET $4`,
       params
     );
 
@@ -572,7 +598,10 @@ export class PGLiteEngine implements BrainEngine {
     // v0.20.0 Cathedral II Layer 6: adds parent_symbol_path / doc_comment /
     // symbol_name_qualified so nested-chunk emission (A3) and eventual A1
     // edge resolution can round-trip metadata through upserts.
-    const cols = '(page_id, chunk_index, chunk_text, chunk_source, embedding, model, token_count, embedded_at, language, symbol_name, symbol_type, start_line, end_line, parent_symbol_path, doc_comment, symbol_name_qualified)';
+    // v0.23 bilingual FTS: include chunk_text_segmented + doc_comment_segmented
+    // so the chunk trigger picks up the CJK channel. Empty strings on
+    // English-only chunks. Column order must match the param push order.
+    const cols = '(page_id, chunk_index, chunk_text, chunk_source, embedding, model, token_count, embedded_at, language, symbol_name, symbol_type, start_line, end_line, parent_symbol_path, doc_comment, symbol_name_qualified, chunk_text_segmented, doc_comment_segmented)';
     const rowParts: string[] = [];
     const params: unknown[] = [];
     let paramIdx = 1;
@@ -584,24 +613,28 @@ export class PGLiteEngine implements BrainEngine {
       const parentPath = chunk.parent_symbol_path && chunk.parent_symbol_path.length > 0
         ? chunk.parent_symbol_path
         : null;
+      const chunkTextSeg = segmentText(chunk.chunk_text || '');
+      const docCommentSeg = segmentText(chunk.doc_comment || '');
 
       if (embeddingStr) {
-        rowParts.push(`($${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}::vector, $${paramIdx++}, $${paramIdx++}, now(), $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}::text[], $${paramIdx++}, $${paramIdx++})`);
+        rowParts.push(`($${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}::vector, $${paramIdx++}, $${paramIdx++}, now(), $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}::text[], $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++})`);
         params.push(
           pageId, chunk.chunk_index, chunk.chunk_text, chunk.chunk_source,
           embeddingStr, chunk.model || 'text-embedding-3-large', chunk.token_count || null,
           chunk.language || null, chunk.symbol_name || null, chunk.symbol_type || null,
           chunk.start_line ?? null, chunk.end_line ?? null,
           parentPath, chunk.doc_comment || null, chunk.symbol_name_qualified || null,
+          chunkTextSeg, docCommentSeg,
         );
       } else {
-        rowParts.push(`($${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, NULL, $${paramIdx++}, $${paramIdx++}, NULL, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}::text[], $${paramIdx++}, $${paramIdx++})`);
+        rowParts.push(`($${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, NULL, $${paramIdx++}, $${paramIdx++}, NULL, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}::text[], $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++})`);
         params.push(
           pageId, chunk.chunk_index, chunk.chunk_text, chunk.chunk_source,
           chunk.model || 'text-embedding-3-large', chunk.token_count || null,
           chunk.language || null, chunk.symbol_name || null, chunk.symbol_type || null,
           chunk.start_line ?? null, chunk.end_line ?? null,
           parentPath, chunk.doc_comment || null, chunk.symbol_name_qualified || null,
+          chunkTextSeg, docCommentSeg,
         );
       }
     }
@@ -628,7 +661,9 @@ export class PGLiteEngine implements BrainEngine {
          end_line = EXCLUDED.end_line,
          parent_symbol_path = EXCLUDED.parent_symbol_path,
          doc_comment = EXCLUDED.doc_comment,
-         symbol_name_qualified = EXCLUDED.symbol_name_qualified`,
+         symbol_name_qualified = EXCLUDED.symbol_name_qualified,
+         chunk_text_segmented = EXCLUDED.chunk_text_segmented,
+         doc_comment_segmented = EXCLUDED.doc_comment_segmented`,
       params
     );
   }
@@ -1174,14 +1209,27 @@ export class PGLiteEngine implements BrainEngine {
   }
 
   async revertToVersion(slug: string, versionId: number): Promise<void> {
+    // Read the version + recompute compiled_truth_segmented on the fly so
+    // post-revert search_vector is bilingual-correct. See postgres-engine.ts
+    // revertToVersion for the design rationale.
+    const { rows } = await this.db.query(
+      `SELECT pv.compiled_truth, pv.frontmatter
+         FROM page_versions pv
+         JOIN pages p ON p.id = pv.page_id
+        WHERE p.slug = $1 AND pv.id = $2`,
+      [slug, versionId]
+    );
+    if (rows.length === 0) return;
+    const v = rows[0] as { compiled_truth: string; frontmatter: unknown };
+    const compiledTruthSeg = segmentText(v.compiled_truth || '');
     await this.db.query(
       `UPDATE pages SET
-        compiled_truth = pv.compiled_truth,
-        frontmatter = pv.frontmatter,
-        updated_at = now()
-      FROM page_versions pv
-      WHERE pages.slug = $1 AND pv.id = $2 AND pv.page_id = pages.id`,
-      [slug, versionId]
+         compiled_truth = $1,
+         compiled_truth_segmented = $2,
+         frontmatter = $3::jsonb,
+         updated_at = now()
+       WHERE slug = $4`,
+      [v.compiled_truth, compiledTruthSeg, JSON.stringify(v.frontmatter), slug]
     );
   }
 

@@ -367,6 +367,12 @@ CREATE INDEX IF NOT EXISTS idx_cycle_locks_ttl ON gbrain_cycle_locks(ttl_expires
 -- Trigger-based search_vector (spans pages + timeline_entries)
 -- ============================================================
 ALTER TABLE pages ADD COLUMN IF NOT EXISTS search_vector tsvector;
+-- CJK FTS: app-side word-segmented mirror columns. See src/schema.sql for
+-- design notes — same shape on both engines so migration v30 is no-op on
+-- a fresh PGLite install.
+ALTER TABLE pages ADD COLUMN IF NOT EXISTS title_segmented           TEXT;
+ALTER TABLE pages ADD COLUMN IF NOT EXISTS compiled_truth_segmented  TEXT;
+ALTER TABLE pages ADD COLUMN IF NOT EXISTS timeline_segmented        TEXT;
 
 CREATE INDEX IF NOT EXISTS idx_pages_search ON pages USING GIN(search_vector);
 
@@ -381,8 +387,11 @@ BEGIN
 
   NEW.search_vector :=
     setweight(to_tsvector('english', coalesce(NEW.title, '')), 'A') ||
+    setweight(to_tsvector('simple',  coalesce(NEW.title_segmented, '')), 'A') ||
     setweight(to_tsvector('english', coalesce(NEW.compiled_truth, '')), 'B') ||
+    setweight(to_tsvector('simple',  coalesce(NEW.compiled_truth_segmented, '')), 'B') ||
     setweight(to_tsvector('english', coalesce(NEW.timeline, '')), 'C') ||
+    setweight(to_tsvector('simple',  coalesce(NEW.timeline_segmented, '')), 'C') ||
     setweight(to_tsvector('english', coalesce(timeline_text, '')), 'C');
 
   RETURN NEW;

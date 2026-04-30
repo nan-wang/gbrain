@@ -14,6 +14,7 @@
 
 import type { BrainEngine } from './engine.ts';
 import type { PageType } from './types.ts';
+import { pinyinTransliterate } from './tokenizer.ts';
 
 // ─── Entity references ──────────────────────────────────────────
 
@@ -610,7 +611,12 @@ export function makeResolver(
 ): SlugResolver {
   const cache = new Map<string, string | null>();
 
-  const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9\s-]/g, '').trim().replace(/\s+/g, '-');
+  // Pinyin-aware normalization: lets Step 2 (dir-hint + slugify exact getPage)
+  // succeed for Chinese names like "百度" → "baidu" instead of falling
+  // through to pg_trgm Step 3. Both still find the page; this just shortens
+  // the path for CJK entities that already have a pinyin slug from
+  // slugifySegment.
+  const norm = (s: string) => pinyinTransliterate(s).toLowerCase().replace(/[^a-z0-9\s-]/g, '').trim().replace(/\s+/g, '-');
 
   return {
     async resolve(name: string, dirHint?: string | string[]): Promise<string | null> {

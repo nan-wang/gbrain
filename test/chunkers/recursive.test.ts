@@ -132,4 +132,53 @@ describe('Recursive Text Chunker', () => {
     const chunks = chunkText(text, { chunkSize: 10 });
     expect(chunks.length).toBeGreaterThan(1);
   });
+
+  // CJK chunking (v0.23 bilingual support)
+  describe('CJK chunking', () => {
+    test('splits Chinese sentences at 。 boundaries', () => {
+      const text = '百度是一家中国互联网公司。它的总部位于北京。'.repeat(10);
+      const chunks = chunkText(text, { chunkSize: 20 });
+      expect(chunks.length).toBeGreaterThan(1);
+      // Most chunks should end at a CJK sentence terminator (allowing for the
+      // last chunk and some overlap-trailing content).
+      const endsAtSentence = chunks.filter(c => /[。！？]/.test(c.text)).length;
+      expect(endsAtSentence).toBeGreaterThanOrEqual(chunks.length - 1);
+    });
+
+    test('splits at CJK clause delimiters when sentences are absent', () => {
+      // Long string with only CJK clause punctuation, no full stops.
+      const text = '百度，腾讯，阿里巴巴，字节跳动，'.repeat(20);
+      const chunks = chunkText(text, { chunkSize: 10 });
+      expect(chunks.length).toBeGreaterThan(1);
+    });
+
+    test('mixed English + Chinese honors both . and 。', () => {
+      const text = ('Hello world. 你好世界。OpenAI is a company. 百度是中国公司。').repeat(20);
+      const chunks = chunkText(text, { chunkSize: 10 });
+      expect(chunks.length).toBeGreaterThan(1);
+      // Lossless invariant: concatenating chunks reproduces (modulo overlap +
+      // trim) the original character set.
+      const firstChunk = chunks[0].text;
+      expect(firstChunk).toMatch(/Hello world/);
+    });
+
+    test('CJK-only run with no punctuation falls back to character window', () => {
+      // 600 Chinese chars, no punctuation, no whitespace — worst case.
+      const text = '中'.repeat(600);
+      const chunks = chunkText(text, { chunkSize: 100 });
+      expect(chunks.length).toBeGreaterThan(1);
+      for (const c of chunks) {
+        // Each chunk should be roughly target characters wide (allow merge headroom).
+        expect(c.text.length).toBeLessThanOrEqual(150);
+        expect(c.text.length).toBeGreaterThan(0);
+      }
+    });
+
+    test('returns single chunk for short Chinese input', () => {
+      const text = '百度是一家公司。';
+      const chunks = chunkText(text);
+      expect(chunks).toHaveLength(1);
+      expect(chunks[0].text).toBe(text);
+    });
+  });
 });

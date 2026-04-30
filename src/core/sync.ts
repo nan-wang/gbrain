@@ -209,7 +209,11 @@ export function isSyncable(path: string, opts: SyncableOptions = {}): boolean {
  * Slugify a single path segment: lowercase, strip special chars, spaces → hyphens.
  */
 export function slugifySegment(segment: string): string {
-  return segment
+  // Han ideographs are pinyin-transliterated FIRST so a CJK file path like
+  // `companies/\u767e\u5ea6.md` becomes `companies/baidu` instead of an empty segment.
+  // Hiragana/katakana/Hangul fall through to the existing ASCII strip (v1
+  // scope; see src/core/tokenizer.ts notes).
+  return pinyinTransliterate(segment)
     .normalize('NFD')                     // Decompose accented chars
     .replace(/[\u0300-\u036f]/g, '')      // Strip accent marks
     .toLowerCase()
@@ -303,6 +307,7 @@ import { existsSync as _existsSync, readFileSync as _readFileSync, appendFileSyn
 import { join as _joinPath } from 'path';
 import { homedir as _homedir } from 'os';
 import { createHash as _createHash } from 'crypto';
+import { pinyinTransliterate } from './tokenizer.ts';
 
 export interface SyncFailure {
   path: string;

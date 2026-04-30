@@ -112,7 +112,13 @@ CREATE TABLE IF NOT EXISTS content_chunks (
   parent_symbol_path    TEXT[],
   doc_comment           TEXT,
   symbol_name_qualified TEXT,
-  search_vector         TSVECTOR
+  search_vector         TSVECTOR,
+  -- CJK FTS: app-side word-segmented mirror columns. Populated by
+  -- segmentText() (Intl.Segmenter) before insert; the chunk trigger
+  -- appends a to_tsvector('simple', ...) channel for CJK recall.
+  -- NULL for English-only chunks (no CJK in input).
+  chunk_text_segmented   TEXT,
+  doc_comment_segmented  TEXT
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_chunks_page_index ON content_chunks(page_id, chunk_index);
@@ -135,15 +141,18 @@ CREATE OR REPLACE FUNCTION update_chunk_search_vector() RETURNS TRIGGER AS \$fn\
 BEGIN
   NEW.search_vector :=
     setweight(to_tsvector('english', COALESCE(NEW.doc_comment, '')), 'A') ||
+    setweight(to_tsvector('simple',  COALESCE(NEW.doc_comment_segmented, '')), 'A') ||
     setweight(to_tsvector('english', COALESCE(NEW.symbol_name_qualified, '')), 'A') ||
-    setweight(to_tsvector('english', COALESCE(NEW.chunk_text, '')), 'B');
+    setweight(to_tsvector('english', COALESCE(NEW.chunk_text, '')), 'B') ||
+    setweight(to_tsvector('simple',  COALESCE(NEW.chunk_text_segmented, '')), 'B');
   RETURN NEW;
 END;
 \$fn\$ LANGUAGE plpgsql;
 
 DROP TRIGGER IF EXISTS chunk_search_vector_trigger ON content_chunks;
 CREATE TRIGGER chunk_search_vector_trigger
-  BEFORE INSERT OR UPDATE OF chunk_text, doc_comment, symbol_name_qualified
+  BEFORE INSERT OR UPDATE OF chunk_text, doc_comment, symbol_name_qualified,
+                              chunk_text_segmented, doc_comment_segmented
   ON content_chunks
   FOR EACH ROW EXECUTE FUNCTION update_chunk_search_vector();
 
@@ -409,6 +418,12 @@ CREATE INDEX IF NOT EXISTS idx_file_migration_ledger_status
 -- Trigger-based search_vector (spans pages + timeline_entries)
 -- ============================================================
 ALTER TABLE pages ADD COLUMN IF NOT EXISTS search_vector tsvector;
+-- CJK FTS: app-side word-segmented mirror columns (populated by segmentText()
+-- before put_page upsert). The page trigger appends a to_tsvector('simple', ...)
+-- channel per existing English channel for CJK recall.
+ALTER TABLE pages ADD COLUMN IF NOT EXISTS title_segmented           TEXT;
+ALTER TABLE pages ADD COLUMN IF NOT EXISTS compiled_truth_segmented  TEXT;
+ALTER TABLE pages ADD COLUMN IF NOT EXISTS timeline_segmented        TEXT;
 
 CREATE INDEX IF NOT EXISTS idx_pages_search ON pages USING GIN(search_vector);
 
@@ -426,8 +441,11 @@ BEGIN
   -- Build weighted tsvector
   NEW.search_vector :=
     setweight(to_tsvector('english', coalesce(NEW.title, '')), 'A') ||
+    setweight(to_tsvector('simple',  coalesce(NEW.title_segmented, '')), 'A') ||
     setweight(to_tsvector('english', coalesce(NEW.compiled_truth, '')), 'B') ||
+    setweight(to_tsvector('simple',  coalesce(NEW.compiled_truth_segmented, '')), 'B') ||
     setweight(to_tsvector('english', coalesce(NEW.timeline, '')), 'C') ||
+    setweight(to_tsvector('simple',  coalesce(NEW.timeline_segmented, '')), 'C') ||
     setweight(to_tsvector('english', coalesce(timeline_text, '')), 'C');
 
   RETURN NEW;
